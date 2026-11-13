@@ -128,56 +128,63 @@ def main() -> int:
             if isinstance(day, dict):
                 days[date] = halves_of(day)
 
-        # Будинки вулиць: група й поточне відключення
+        # Будинки вулиць: група й поточне відключення. Назви вулиці в ДТЕК бувають різні
+        # («вул. Бабкіна», «вул. Бабкіна Олега»…) — беремо всі збіги з довідника сторінки
         addresses = {}
         for s in streets:
-            res = page.evaluate(
-                """async ({city, street}) => {
-                    const token = document.querySelector('meta[name="csrf-token"]')?.content || ''
-                    const body = new URLSearchParams({
-                        method: 'getHomeNum',
-                        'data[0][name]': 'city', 'data[0][value]': city,
-                        'data[1][name]': 'street', 'data[1][value]': street,
-                    })
-                    const r = await fetch('/ua/ajax', {
-                        method: 'POST', body,
-                        headers: {'X-CSRF-Token': token, 'X-Requested-With': 'XMLHttpRequest'},
-                    })
-                    try { return await r.json() } catch (e) { return {error: String(r.status)} }
+            cands = page.evaluate(
+                """({city, street}) => {
+                    const all = (window.DisconSchedule && window.DisconSchedule.streets) || {}
+                    const norm = (t) => t.toLowerCase().replace(/^(м|с|смт|вул|просп|пров|бульв)\\.?\\s*/, '').trim()
+                    const cities = Object.keys(all).filter(k => norm(k) === norm(city) || k === city)
+                    const out = []
+                    for (const c of cities) for (const st of all[c] || []) if (norm(st).includes(norm(street))) out.push([c, st])
+                    return out
                 }""",
                 {"city": s["city"], "street": s["street"]},
-            )
+            ) or [[s["city"], s["street"]]]
+            print("варіанти адреси:", json.dumps(cands, ensure_ascii=False))
             houses = {}
-            for num, info in ((res or {}).get("data") or {}).items():
-                if not isinstance(info, dict):
-                    continue
-                reasons = info.get("sub_type_reason") or []
-                group = reasons[0] if isinstance(reasons, list) and reasons else None
-                m = re.match(r"GPV(\d+\.\d+)", str(group or ""))
-                outage = None
-                if info.get("start_date") or info.get("sub_type"):
-                    outage = {
-                        "type": str(info.get("type") or ""),
-                        "reason": str(info.get("sub_type") or ""),
-                        "start": str(info.get("start_date") or ""),
-                        "end": str(info.get("end_date") or ""),
-                    }
-                houses[num] = {"group": m.group(1) if m else group, "outage": outage}
+            errors = []
+            for city, street in cands:
+                res = page.evaluate(
+                    """async ({city, street}) => {
+                        const token = document.querySelector('meta[name="csrf-token"]')?.content || ''
+                        const body = new URLSearchParams({
+                            method: 'getHomeNum',
+                            'data[0][name]': 'city', 'data[0][value]': city,
+                            'data[1][name]': 'street', 'data[1][value]': street,
+                        })
+                        const r = await fetch('/ua/ajax', {
+                            method: 'POST', body,
+                            headers: {'X-CSRF-Token': token, 'X-Requested-With': 'XMLHttpRequest'},
+                        })
+                        try { return await r.json() } catch (e) { return {error: String(r.status)} }
+                    }""",
+                    {"city": city, "street": street},
+                )
+                for num, info in ((res or {}).get("data") or {}).items():
+                    if not isinstance(info, dict):
+                        continue
+                    reasons = info.get("sub_type_reason") or []
+                    group = reasons[0] if isinstance(reasons, list) and reasons else None
+                    m = re.match(r"GPV(\d+\.\d+)", str(group or ""))
+                    outage = None
+                    if info.get("start_date") or info.get("sub_type"):
+                        outage = {
+                            "type": str(info.get("type") or ""),
+                            "reason": str(info.get("sub_type") or ""),
+                            "start": str(info.get("start_date") or ""),
+                            "end": str(info.get("end_date") or ""),
+                        }
+                    key = num if len(cands) == 1 else f"{street}, {num}"
+                    houses[key] = {"group": m.group(1) if m else group, "outage": outage, "street": street}
+                if (res or {}).get("error"):
+                    errors.append(str(res["error"]))
             addresses[s["key"]] = {
                 "houses": houses,
-                "error": None if houses else str((res or {}).get("error") or "будинків не знайдено"),
+                "error": None if houses else (", ".join(errors) or "будинків не знайдено"),
             }
-            if not houses:
-                # Підказка в лог: як ДТЕК пише місто й вулицю
-                hint = page.evaluate(
-                    """({city, street}) => {
-                        const s = (window.DisconSchedule && window.DisconSchedule.streets) || {}
-                        const c = Object.keys(s).filter(k => k.toLowerCase().includes(city.toLowerCase().replace(/^м\\.\\s*/, '')))
-                        return c.slice(0, 5).map(k => [k, (s[k] || []).filter(v => v.toLowerCase().includes(street.toLowerCase().replace(/^вул\\.\\s*/, ''))).slice(0, 5)])
-                    }""",
-                    {"city": s["city"], "street": s["street"]},
-                )
-                print("адреса не знайдена, варіанти:", json.dumps(hint, ensure_ascii=False))
         browser.close()
 
     out = {
