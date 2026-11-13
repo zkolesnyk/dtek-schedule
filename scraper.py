@@ -267,7 +267,8 @@ def main() -> int:
         catalog = previous_catalog()
         cities = sorted({s["city"] for s in streets})
         age = time.time() - (catalog or {}).get("built", 0)
-        if cities and (not catalog or age > CATALOG_EVERY or sorted(catalog.get("cities", {})) != cities):
+        empty = not catalog or any(not v for v in catalog.get("cities", {}).values())
+        if cities and (empty or age > CATALOG_EVERY or sorted(catalog.get("cities", {})) != cities):
             catalog = {"version": 1, "built": int(time.time()), "cities": build_catalog(page, cities)}
         browser.close()
 
