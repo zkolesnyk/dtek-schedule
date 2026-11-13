@@ -57,7 +57,30 @@ def previous_catalog() -> dict | None:
 
 def build_catalog(page, cities: list[str]) -> dict:
     """{місто: {вулиця: {будинок: група}}} — усі вулиці міст із секрету STREETS"""
-    all_streets = page.evaluate("() => (window.DisconSchedule && window.DisconSchedule.streets) || {}")
+    all_streets = page.evaluate("() => (window.DisconSchedule && window.DisconSchedule.streets) || {}") or {}
+    print("DisconSchedule.streets: міст", len(all_streets), "приклад", list(all_streets)[:3])
+    if not any(c in all_streets for c in cities):
+        # Інакше — запит getStreets (як у віджеті сторінки) чи обʼєкт зі скрипту HTML
+        res = page.evaluate("""async () => {
+            const token = document.querySelector('meta[name="csrf-token"]')?.content || ''
+            const r = await fetch('/ua/ajax', {method: 'POST', body: new URLSearchParams({method: 'getStreets'}),
+                headers: {'X-CSRF-Token': token, 'X-Requested-With': 'XMLHttpRequest'}})
+            const t = await r.text()
+            try { return JSON.parse(t) } catch (e) { return {raw: t.slice(0, 300), status: r.status} }
+        }""")
+        print("getStreets:", str(res)[:300] if not isinstance(res, dict) or "streets" not in res else ("міст", len(res["streets"])))
+        if isinstance(res, dict) and isinstance(res.get("streets"), dict):
+            all_streets = res["streets"]
+        else:
+            html = page.content()
+            m = re.search(r"DisconSchedule\.streets\s*=\s*(\{.*?\});", html)
+            if m:
+                try:
+                    all_streets = json.loads(m.group(1))
+                    print("streets зі скрипту: міст", len(all_streets))
+                except ValueError:
+                    pass
+        print("Бориспіль у довіднику:", [c for c in all_streets if "Борисп" in c][:5])
     out = {}
     for city in cities:
         names = all_streets.get(city) or []
