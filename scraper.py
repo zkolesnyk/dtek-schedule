@@ -40,6 +40,37 @@ def blocked(html: str) -> bool:
     return "_incapsula_resource" in low or "request unsuccessful" in low
 
 
+FACT_RE = re.compile(r"\bfact\s*=\s*\{")
+
+
+def extract_fact(html: str):
+    """Обʼєкт `fact = {...}` зі скрипту сторінки — балансуванням дужок з урахуванням рядків"""
+    m = FACT_RE.search(html)
+    if not m:
+        return None
+    start = m.end() - 1
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(html)):
+        ch = html[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(html[start : i + 1])
+    return None
+
+
 def halves_of(day: dict) -> dict:
     """{"GPV3.2": {"1": "yes", ...}} -> {"3.2": [48 чисел]}; ключ години "1" — це 00:00–01:00"""
     out = {}
@@ -67,12 +98,26 @@ def main() -> int:
                 print(f"спроба {attempt + 1}: заглушка Imperva")
                 page.wait_for_timeout(5_000)
                 continue
-            fact = page.evaluate("() => (window.DisconSchedule && window.DisconSchedule.fact) || null")
+            fact = page.evaluate("() => (window.DisconSchedule && window.DisconSchedule.fact) || null") or extract_fact(page.content())
             if fact:
                 break
+        # Оголошення на сторінці (екстренні відключення, графіки не діють) — текст як є
+        notice = page.evaluate(
+            """() => {
+                const re = /екстрен|аварійн|графік[иів]* не (діють|застосов)|без застосування графік/i
+                const els = [...document.querySelectorAll('h1, h2, h3, p, div, span, strong')]
+                const hit = els.find(el => el.children.length < 3 && re.test(el.textContent || '') && (el.textContent || '').trim().length < 400)
+                return hit ? hit.textContent.replace(/\\s+/g, ' ').trim() : null
+            }"""
+        )
+        title = page.title()
         if not fact:
-            print("не отримав DisconSchedule.fact", page.title(), len(page.content()))
-            return 1
+            html = page.content()
+            print("не отримав fact", title, len(html), "fact=" in html, notice)
+            # Що є на сторінці навколо слова fact — щоб підлаштувати розбір
+            i = html.find("fact")
+            print(html[max(0, i - 200): i + 300] if i >= 0 else "слова fact немає")
+            fact = {}
 
         days = {}
         for ts, day in (fact.get("data") or {}).items():
@@ -140,6 +185,8 @@ def main() -> int:
         "region": "kr",
         "fetched_at": datetime.now(KYIV).isoformat(timespec="seconds"),
         "dtek_updated": fact.get("update"),
+        "page_title": title,
+        "notice": notice,
         "days": days,
         "addresses": addresses,
     }
