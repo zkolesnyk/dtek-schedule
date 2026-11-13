@@ -15,6 +15,8 @@ import json
 import os
 import re
 import sys
+import time
+import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -22,6 +24,59 @@ from playwright.sync_api import sync_playwright
 
 KYIV = ZoneInfo("Europe/Kyiv")
 URL = "https://www.dtek-krem.com.ua/ua/shutdowns"
+# Довідник будинків міста (вулиця → будинок → група) — раз на добу, бо це сотні запитів
+CATALOG_URL = "https://raw.githubusercontent.com/{repo}/data/catalog.json"
+CATALOG_EVERY = 20 * 3600
+
+HOME_NUM_JS = """async ({city, street}) => {
+    const token = document.querySelector('meta[name="csrf-token"]')?.content || ''
+    const body = new URLSearchParams({
+        method: 'getHomeNum',
+        'data[0][name]': 'city', 'data[0][value]': city,
+        'data[1][name]': 'street', 'data[1][value]': street,
+    })
+    const r = await fetch('/ua/ajax', {
+        method: 'POST', body,
+        headers: {'X-CSRF-Token': token, 'X-Requested-With': 'XMLHttpRequest'},
+    })
+    try { return await r.json() } catch (e) { return {error: String(r.status)} }
+}"""
+
+
+def previous_catalog() -> dict | None:
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not repo:
+        return None
+    try:
+        with urllib.request.urlopen(CATALOG_URL.format(repo=repo) + f"?t={int(time.time())}", timeout=20) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception as e:  # noqa: BLE001
+        print("попереднього довідника немає:", e)
+        return None
+
+
+def build_catalog(page, cities: list[str]) -> dict:
+    """{місто: {вулиця: {будинок: група}}} — усі вулиці міст із секрету STREETS"""
+    all_streets = page.evaluate("() => (window.DisconSchedule && window.DisconSchedule.streets) || {}")
+    out = {}
+    for city in cities:
+        names = all_streets.get(city) or []
+        streets = {}
+        for street in names:
+            res = page.evaluate(HOME_NUM_JS, {"city": city, "street": street})
+            houses = {}
+            for num, info in ((res or {}).get("data") or {}).items():
+                if not isinstance(info, dict):
+                    continue
+                reasons = info.get("sub_type_reason") or []
+                m = re.match(r"GPV(\d+\.\d+)", str(reasons[0] if reasons else ""))
+                houses[num] = m.group(1) if m else None
+            if houses:
+                streets[street] = houses
+            page.wait_for_timeout(250)
+        out[city] = streets
+        print("довідник:", city, "вулиць", len(names), "з будинками", len(streets))
+    return out
 
 # Стан години в fact -> пів-години (перша, друга): 0 — світло є, 1 — відключення, 2 — можливе
 HALVES = {
@@ -185,6 +240,12 @@ def main() -> int:
                 "houses": houses,
                 "error": None if houses else (", ".join(errors) or "будинків не знайдено"),
             }
+        # Довідник будинків: свіжий (молодший за добу) — беремо попередній, інакше збираємо заново
+        catalog = previous_catalog()
+        cities = sorted({s["city"] for s in streets})
+        age = time.time() - (catalog or {}).get("built", 0)
+        if cities and (not catalog or age > CATALOG_EVERY or sorted(catalog.get("cities", {})) != cities):
+            catalog = {"version": 1, "built": int(time.time()), "cities": build_catalog(page, cities)}
         browser.close()
 
     out = {
@@ -200,6 +261,9 @@ def main() -> int:
     os.makedirs("out", exist_ok=True)
     with open("out/schedule.json", "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
+    if catalog:
+        with open("out/catalog.json", "w", encoding="utf-8") as f:
+            json.dump(catalog, f, ensure_ascii=False, separators=(",", ":"))
     print("днів:", list(days), "груп:", len(next(iter(days.values()), {})), "адрес:", {k: len(v["houses"]) for k, v in addresses.items()})
     return 0
 
